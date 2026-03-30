@@ -1,5 +1,61 @@
 import numpy as np
 from scipy.optimize import linprog
+import pandas as pd
+
+
+
+# TODO: indifference thresholds, checking for 0 division, no "lower is better", add assertions
+def normalize(gc_data):
+    return (gc_data - gc_data.min()) / (gc_data.max() - gc_data.min())
+
+# sensitivity analysis with this normalization, not per RCP.
+# iland_one_gc_normalized = (iland_one_gc - iland_one_gc.min()) / (iland_one_gc.max() - iland_one_gc.min())
+
+def convert_to_optimizer_input(gc_data):
+    df_long = gc_data.stack().rename("value")
+    df_long.index.set_names(['rid', 'Germany_id', "RCPScenario", "management", "ES"], inplace=True)
+    df_long = df_long.reorder_levels(["ES", 'Germany_id', 'rid', "RCPScenario", "management"])
+    df_long = df_long.unstack("management")
+    df_long.columns.name = None # removes an arbitrarily added "management" column, the managements are their own columns now.
+    return df_long
+
+
+TOLERANCE = 0.00001
+
+
+def prepare_for_optimization(gc_data):
+    normalized_gc_data = gc_data.groupby('RCPScenario', group_keys=False).apply(normalize)
+
+    return convert_to_optimizer_input(normalized_gc_data)
+
+
+def prepare_and_optimize_gridcell(gc_data):
+    optimizer_data = prepare_for_optimization(gc_data)
+    return optimize_gridcell(optimizer_data, gc_data.index.get_level_values('rid')[0])
+
+
+def optimize_gridcell(gc_data_for_optimizer, rid, es_weights=None):
+
+    opt_result = solve_optimization_for_gridcell_general_min_max_distance(gc_data_for_optimizer.values, ['rcp26', 'rcp45', 'rcp85'], es_weights=es_weights)
+
+    assert opt_result.success == True, "Optimization failed for gc " + str(rid)
+
+    portfolio = opt_result.x[1:]
+    portfolio[np.abs(portfolio) < TOLERANCE] = 0.0
+
+    portfolio_sum = np.sum(portfolio)
+    assert np.abs(portfolio_sum - 1) < TOLERANCE, "Optimization result does not sum to 1 but " + str(portfolio_sum) + " for gc " + str(rid)
+    assert np.all(portfolio >= 0), "negative portfolio values"
+
+    managements = list(gc_data_for_optimizer.columns)
+    return pd.Series({managements[i]: portfolio[i] for i in range(len(managements))})
+
+def compute_mean_portfolios(grp):
+    hexagon_mean_portfolio = grp.mean(axis=0)
+    portfolio_sum = hexagon_mean_portfolio.values.sum()
+    assert np.abs(portfolio_sum-1) < TOLERANCE, "Averaged portfolio does not sum to 1 but to " + str(portfolio_sum) + " for hexagon " + str(grp.index.get_level_values('Germany_id')[0])
+    return hexagon_mean_portfolio
+
 
 
 def solve_optimization_for_gridcell_general_min_max_distance(es_vals, rcps, es_weights=None, m_upper_bounds=None, m_lower_bounds=None, additional_constraints=None, lambda_opt=0, infeasible_management_idxs=[]):
