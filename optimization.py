@@ -8,11 +8,7 @@ import pandas as pd
 def normalize(gc_data):
     row_min = gc_data.min(axis=1)
     row_range = gc_data.max(axis=1) - row_min
-
-    # avoid division by zero → will produce NaNs for constant rows
     result = gc_data.sub(row_min, axis=0).div(row_range, axis=0)
-
-    # replace NaNs (from constant rows) with 0
     return result.fillna(0)
 
 # sensitivity analysis with this normalization, not per RCP.
@@ -41,9 +37,31 @@ def prepare_and_optimize_gridcell(gc_data):
     return optimize_gridcell(optimizer_data, gc_data.index.get_level_values('rid')[0])
 
 
-def optimize_gridcell(gc_data_for_optimizer, location, climate_scenarios, es_weights=None):
+def optimize_gridcell(gc_data_for_optimizer, location, management_options, climate_scenarios, es, scenario_columnname, es_columnname, es_weights=None):
+    #TODO have to do assertions on the order of the data
+    #TODO I thought when switching the next two statements or switching the sor, there would be a different outcome, but apparently not...?
+    gc_data_for_optimizer[scenario_columnname] = pd.Categorical(
+        gc_data_for_optimizer[scenario_columnname],
+        categories=climate_scenarios,
+        ordered=True
+    )
+    gc_data_for_optimizer[es_columnname] = pd.Categorical(
+        gc_data_for_optimizer[es_columnname],
+        categories=es,
+        ordered=True
+    )
+    gc_data_for_optimizer = gc_data_for_optimizer.sort_values(
+        by=["Lon", "Lat", es_columnname, scenario_columnname]
+    )
 
-    opt_result = solve_optimization_for_gridcell_general_min_max_distance(gc_data_for_optimizer.values, rcps=climate_scenarios, es_weights=es_weights)
+    n_climate_scenarios = len(climate_scenarios)
+    if n_climate_scenarios > 1:
+        # Data needs to be grouped by ES first, because the weights will later be put like [0.2, 0.2, 0.2, 0.1, 0.1, 0.1, ...]
+        assert np.all(gc_data_for_optimizer.iloc[0:n_climate_scenarios][es_columnname] == es[0]), "Order of the optimization data is broken!"
+
+    raw_optimizer_data = gc_data_for_optimizer.loc[:, management_options].to_numpy()
+
+    opt_result = solve_optimization_for_gridcell_general_min_max_distance(raw_optimizer_data, rcps=climate_scenarios, es_weights=es_weights)
 
     assert opt_result.success == True, "Optimization failed for gc " + str(location)
 
@@ -54,8 +72,7 @@ def optimize_gridcell(gc_data_for_optimizer, location, climate_scenarios, es_wei
     assert np.abs(portfolio_sum - 1) < TOLERANCE, "Optimization result does not sum to 1 but " + str(portfolio_sum) + " for gc " + str(location)
     assert np.all(portfolio >= 0), "negative portfolio values"
 
-    managements = list(gc_data_for_optimizer.columns)
-    return pd.Series({managements[i]: portfolio[i] for i in range(len(managements))})
+    return pd.Series({management_options[i]: portfolio[i] for i in range(len(management_options))})
 
 def compute_mean_portfolios(grp):
     hexagon_mean_portfolio = grp.mean(axis=0)
