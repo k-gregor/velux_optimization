@@ -4,9 +4,16 @@ import pandas as pd
 
 
 
-# TODO: indifference thresholds, checking for 0 division, no "lower is better", add assertions
+# TODO: indifference thresholds, no "lower is better", add assertions
 def normalize(gc_data):
-    return (gc_data - gc_data.min()) / (gc_data.max() - gc_data.min())
+    row_min = gc_data.min(axis=1)
+    row_range = gc_data.max(axis=1) - row_min
+
+    # avoid division by zero → will produce NaNs for constant rows
+    result = gc_data.sub(row_min, axis=0).div(row_range, axis=0)
+
+    # replace NaNs (from constant rows) with 0
+    return result.fillna(0)
 
 # sensitivity analysis with this normalization, not per RCP.
 # iland_one_gc_normalized = (iland_one_gc - iland_one_gc.min()) / (iland_one_gc.max() - iland_one_gc.min())
@@ -36,9 +43,7 @@ def prepare_and_optimize_gridcell(gc_data):
 
 def optimize_gridcell(gc_data_for_optimizer, location, climate_scenarios, es_weights=None):
 
-    # TODO add assertion about values in [0, 1]
-
-    opt_result = solve_optimization_for_gridcell_general_min_max_distance(gc_data_for_optimizer.values, climate_scenarios, es_weights=es_weights)
+    opt_result = solve_optimization_for_gridcell_general_min_max_distance(gc_data_for_optimizer.values, rcps=climate_scenarios, es_weights=es_weights)
 
     assert opt_result.success == True, "Optimization failed for gc " + str(location)
 

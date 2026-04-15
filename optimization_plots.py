@@ -9,11 +9,9 @@ from cartopy.io import shapereader
 countries_polygons = gpd.read_file(shapereader.natural_earth(resolution='10m', category='cultural', name='admin_1_states_provinces'))
 
 
-def deck_plot(optimized_data, management_forms, management_colors):
+def deck_plot(optimized_data, management_forms, management_colors, radius_km=5):
 
-    radius_km = 5  # radius of pies in km
-
-    def make_pie_polygons(lat, lon, values, radius_km=5):
+    def make_pie_polygons(lat, lon, values, radius_km=radius_km):
         """
         Returns a list of polygons (one per slice) around (lat, lon)
         Corrects for longitude scaling at the given latitude.
