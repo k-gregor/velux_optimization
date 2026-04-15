@@ -11,11 +11,11 @@ def normalize(gc_data):
 # sensitivity analysis with this normalization, not per RCP.
 # iland_one_gc_normalized = (iland_one_gc - iland_one_gc.min()) / (iland_one_gc.max() - iland_one_gc.min())
 
-def convert_to_optimizer_input(gc_data):
+def convert_to_optimizer_input(gc_data, location_names, scenario_variable_name):
     df_long = gc_data.stack().rename("value")
-    df_long.index.set_names(['rid', 'Germany_id', "RCPScenario", "management", "ES"], inplace=True)
-    df_long = df_long.reorder_levels(["ES", 'Germany_id', 'rid', "RCPScenario", "management"])
-    df_long = df_long.unstack("management")
+    df_long.index.set_names(location_names + [scenario_variable_name, "management", "ES"], inplace=True)
+    df_long = df_long.reorder_levels(["ES"] + location_names + [scenario_variable_name, "management"])
+    df_long = df_long.unstack('ES')
     df_long.columns.name = None # removes an arbitrarily added "management" column, the managements are their own columns now.
     return df_long
 
@@ -23,10 +23,10 @@ def convert_to_optimizer_input(gc_data):
 TOLERANCE = 0.00001
 
 
-def prepare_for_optimization(gc_data):
-    normalized_gc_data = gc_data.groupby('RCPScenario', group_keys=False).apply(normalize)
+def prepare_for_optimization(gc_data, location_names=['rid', 'Germany_id'], scenario_name='RCPScenario'):
+    normalized_gc_data = gc_data.groupby(scenario_name, group_keys=False).apply(normalize)
 
-    return convert_to_optimizer_input(normalized_gc_data)
+    return convert_to_optimizer_input(normalized_gc_data, location_names=location_names, scenario_variable_name=scenario_name)
 
 
 def prepare_and_optimize_gridcell(gc_data):
@@ -34,17 +34,19 @@ def prepare_and_optimize_gridcell(gc_data):
     return optimize_gridcell(optimizer_data, gc_data.index.get_level_values('rid')[0])
 
 
-def optimize_gridcell(gc_data_for_optimizer, rid, es_weights=None):
+def optimize_gridcell(gc_data_for_optimizer, location, climate_scenarios, es_weights=None):
 
-    opt_result = solve_optimization_for_gridcell_general_min_max_distance(gc_data_for_optimizer.values, ['rcp26', 'rcp45', 'rcp85'], es_weights=es_weights)
+    # TODO add assertion about values in [0, 1]
 
-    assert opt_result.success == True, "Optimization failed for gc " + str(rid)
+    opt_result = solve_optimization_for_gridcell_general_min_max_distance(gc_data_for_optimizer.values, climate_scenarios, es_weights=es_weights)
+
+    assert opt_result.success == True, "Optimization failed for gc " + str(location)
 
     portfolio = opt_result.x[1:]
     portfolio[np.abs(portfolio) < TOLERANCE] = 0.0
 
     portfolio_sum = np.sum(portfolio)
-    assert np.abs(portfolio_sum - 1) < TOLERANCE, "Optimization result does not sum to 1 but " + str(portfolio_sum) + " for gc " + str(rid)
+    assert np.abs(portfolio_sum - 1) < TOLERANCE, "Optimization result does not sum to 1 but " + str(portfolio_sum) + " for gc " + str(location)
     assert np.all(portfolio >= 0), "negative portfolio values"
 
     managements = list(gc_data_for_optimizer.columns)
@@ -97,7 +99,7 @@ def get_optimization_inputs_for_gridcell_general_min_max_distance(es_vals, rcps,
         es_weights = np.ones_like(es_vals) / es_vals.shape[0]
     else:
         n_weights = np.squeeze(np.shape(es_weights))
-        assert n_weights == n_vals, "not the right dimension of weights!"
+        assert n_weights == n_vals, "not the right dimension of weights: " + str(n_weights) + " weights but variables: " + str(n_vals)
 
         if len(rcps) > 1:
             # [0.5, 0.2, 0.3] --> [0.5, 0.5, 0.2, 0.2, 0.3, 0.3]

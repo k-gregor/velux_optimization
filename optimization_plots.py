@@ -9,17 +9,7 @@ from cartopy.io import shapereader
 countries_polygons = gpd.read_file(shapereader.natural_earth(resolution='10m', category='cultural', name='admin_1_states_provinces'))
 
 
-def deck_plot(optimized_data):
-
-    # Example: shape_cluster6 already has columns:
-    # "lat", "lon", "name", "high-structure", "low-structure", "medium-structure", "no-mgmt"
-    cols = ["high-structure", "low-structure", "medium-structure", "no-mgmt"]
-    colors = [
-        [255, 165, 0, 160],   # orange
-        [50, 205, 50, 160],   # limegreen
-        [0, 100, 0, 160],     # darkgreen
-        [128, 0, 128, 160]    # purple
-    ]
+def deck_plot(optimized_data, management_forms, management_colors):
 
     radius_km = 5  # radius of pies in km
 
@@ -55,14 +45,14 @@ def deck_plot(optimized_data):
     # Flatten all slices into a DataFrame
     poly_data = []
     for i, row in optimized_data.iterrows():
-        slices = make_pie_polygons(row["lat"], row["lon"], row[cols].values, radius_km)
+        slices = make_pie_polygons(row["lat"], row["lon"], row[management_forms].values, radius_km)
         for j, poly in enumerate(slices):
             poly_data.append({
                 "polygon": poly,
                 "name": 'Portfolio',
-                "value": row[cols].values[j],
-                "slice": cols[j],
-                "color": colors[j]
+                "value": row[management_forms].values[j],
+                "slice": management_forms[j],
+                "color": management_colors[j]
             })
 
     poly_df = pd.DataFrame(poly_data)
@@ -93,13 +83,10 @@ def deck_plot(optimized_data):
     return deck
 
 
-
-cols = ["high-structure", "low-structure", "medium-structure", "no-mgmt"]
-colors = ["orange", "limegreen", "darkgreen", "purple"]
 brandenburg_extent = [10.5, 15.5, 51, 54]
 
 
-def draw_pie_inset(ax, ratios, x, y, size=0.03):
+def draw_pie_inset(ax, ratios, x, y, management_colors, size=0.03):
     trans = ax.transData.transform((x, y))
     inv = ax.transAxes.inverted().transform(trans)
 
@@ -107,7 +94,7 @@ def draw_pie_inset(ax, ratios, x, y, size=0.03):
 
     pie_ax.pie(
         ratios,
-        colors=colors,
+        colors=management_colors,
         wedgeprops=dict(width=0.75)  # 👈 donut!
     )
 
@@ -115,7 +102,7 @@ def draw_pie_inset(ax, ratios, x, y, size=0.03):
     pie_ax.axis('off')
 
 
-def plot_portfolios_on_hexagons(ds):
+def plot_portfolios_on_hexagons(ds, management_options, management_colors):
     fig, ax = plt.subplots(1, 1, figsize=(10, 10), subplot_kw={'projection': ccrs.PlateCarree()})
 
     ax.set_extent(brandenburg_extent, crs=ccrs.PlateCarree())
@@ -129,4 +116,4 @@ def plot_portfolios_on_hexagons(ds):
     coords = ds.geometry.apply(lambda x: x.representative_point())
 
     for (_, row), point in zip(ds.iterrows(), coords):
-        draw_pie_inset(ax, row[cols], point.x, point.y, size=0.07)
+        draw_pie_inset(ax, row[management_options], point.x, point.y, management_colors, size=0.07)
