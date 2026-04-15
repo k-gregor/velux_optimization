@@ -26,20 +26,13 @@ def convert_to_optimizer_input(gc_data, location_names, scenario_variable_name):
 TOLERANCE = 0.00001
 
 
-def prepare_for_optimization(gc_data, location_names=['rid', 'Germany_id'], scenario_name='RCPScenario'):
+def prepare_for_optimization(gc_data, location_names, scenario_name):
     normalized_gc_data = gc_data.groupby(scenario_name, group_keys=False).apply(normalize)
 
     return convert_to_optimizer_input(normalized_gc_data, location_names=location_names, scenario_variable_name=scenario_name)
 
 
-def prepare_and_optimize_gridcell(gc_data):
-    optimizer_data = prepare_for_optimization(gc_data)
-    return optimize_gridcell(optimizer_data, gc_data.index.get_level_values('rid')[0])
-
-
-def optimize_gridcell(gc_data_for_optimizer, location, management_options, climate_scenarios, es, scenario_columnname, es_columnname, es_weights=None):
-    #TODO have to do assertions on the order of the data
-    #TODO I thought when switching the next two statements or switching the sor, there would be a different outcome, but apparently not...?
+def optimize_gridcell(gc_data_for_optimizer, location, location_names, management_options, climate_scenarios, es, scenario_columnname, es_columnname, es_weights=None):
     gc_data_for_optimizer[scenario_columnname] = pd.Categorical(
         gc_data_for_optimizer[scenario_columnname],
         categories=climate_scenarios,
@@ -51,7 +44,7 @@ def optimize_gridcell(gc_data_for_optimizer, location, management_options, clima
         ordered=True
     )
     gc_data_for_optimizer = gc_data_for_optimizer.sort_values(
-        by=["Lon", "Lat", es_columnname, scenario_columnname]
+        by=location_names + [es_columnname, scenario_columnname]
     )
 
     n_climate_scenarios = len(climate_scenarios)
