@@ -8,55 +8,151 @@ import cartopy.crs as ccrs
 from cartopy.io import shapereader
 countries_polygons = gpd.read_file(shapereader.natural_earth(resolution='10m', category='cultural', name='admin_1_states_provinces'))
 
+import colorsys
 
-def deck_plot(optimized_data, management_forms, management_colors, radius_km=5):
 
-    def make_pie_polygons(lat, lon, values, radius_km=radius_km):
+base_colors = {
+    "spbau": (0/255, 0/255, 255/255),
+    "tobd": (0/255, 128/255, 0/255),
+    "tone": (255/255, 165/255, 0/255),
+    "spbau_stop": (128/255, 0/255, 128/255)
+}
+
+# (value_factor, saturation_factor)
+intensity = {
+    "longrot": (1.0, 0.5),   # lighter → less saturated
+    "manbau": (1.0, 1.0),    # base
+    "shortrot": (0.7, 1.0)   # darker → lower value
+}
+
+def adjust_color(rgb, v_factor, s_factor):
+    h, s, v = colorsys.rgb_to_hsv(*rgb)
+
+    v = min(v * v_factor, 1.0)
+    s = min(s * s_factor, 1.0)
+
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (int(r * 255), int(g * 255), int(b * 255), 220)
+
+def get_color(name):
+    if name == "spbau_stop":
+        r, g, b = base_colors["spbau_stop"]
+        return (int(r*255), int(g*255), int(b*255), 220)
+
+    system, management = name.split("_")
+    base = base_colors[system]
+    v_factor, s_factor = intensity[management]
+
+    return adjust_color(base, v_factor, s_factor)
+
+
+
+
+
+
+def deck_plot(optimized_data, management_forms, management_colors, es, radius_km=5):
+
+    import numpy as np
+
+    def make_pie_polygons(lat, lon, values, es_values=None, radius_km=10):
         """
-        Returns a list of polygons (one per slice) around (lat, lon)
-        Corrects for longitude scaling at the given latitude.
+        Returns:
+            pie_polygons: list of slice polygons
+            radar_polygon: single polygon (or None)
+
+        values: portfolio shares (pie)
+        es_values: list of ES values (radar overlay)
         """
+
+        # --- PIE PART (unchanged) ---
         total = sum(values)
         start_angle = 0
-        polygons = []
+        pie_polygons = []
 
-        # factor to correct lon distance at this latitude
         lon_factor = np.cos(np.deg2rad(lat))
 
-        for i, v in enumerate(values):
+        for v in values:
             fraction = v / total if total != 0 else 0
             end_angle = start_angle + fraction * 360
 
-            points = [[lon, lat]]  # center
-            angles = np.linspace(start_angle, end_angle, max(2, int(fraction*30)))
+            points = [[lon, lat]]
+            angles = np.linspace(start_angle, end_angle, max(2, int(fraction * 30)))
+
             for angle in angles:
                 rad = np.deg2rad(angle)
-                dlon = (radius_km / 111) * np.cos(rad) / lon_factor  # scale longitude
+                dlon = (radius_km / 111) * np.cos(rad) / lon_factor
                 dlat = (radius_km / 111) * np.sin(rad)
                 points.append([lon + dlon, lat + dlat])
+
             points.append([lon, lat])
-            polygons.append(points)
+            pie_polygons.append(points)
             start_angle = end_angle
 
-        return polygons
+        # --- RADAR PART ---
+        radar_polygon = None
 
-    # Flatten all slices into a DataFrame
+        if es_values is not None and len(es_values) > 0:
+            es_values = np.array(es_values, dtype=float)
+
+            n = len(es_values)
+            angles = np.linspace(0, 360, n, endpoint=False)
+
+            radar_points = []
+
+            for val, angle in zip(es_values, angles):
+                rad = np.deg2rad(angle)
+
+                # scale radius by ES value
+                r = radius_km * val
+
+                dlon = (r / 111) * np.cos(rad) / lon_factor
+                dlat = (r / 111) * np.sin(rad)
+
+                radar_points.append([lon + dlon, lat + dlat])
+
+            # close polygon
+            radar_points.append(radar_points[0])
+            radar_polygon = radar_points
+
+            return pie_polygons, radar_polygon
+
     poly_data = []
+    radar_data = []
+
     for i, row in optimized_data.iterrows():
-        slices = make_pie_polygons(row["lat"], row["lon"], row[management_forms].values, radius_km)
+        slices, radar = make_pie_polygons(
+            row["lat"],
+            row["lon"],
+            row[management_forms].values,
+            row[es],   # ES values for radar
+            radius_km
+        )
+
+        # --- Pie slices ---
         for j, poly in enumerate(slices):
             poly_data.append({
                 "polygon": poly,
-                "name": 'Portfolio',
+                "name": "Portfolio",
                 "value": row[management_forms].values[j],
                 "slice": management_forms[j],
                 "color": management_colors[j]
             })
 
-    poly_df = pd.DataFrame(poly_data)
+        # --- Radar polygon ---
+        if radar is not None:
+            radar_data.append({
+                "polygon": radar,
+                "name": "Ecosystem Services",
+                "value": ", ".join([f"{v:.2f}" for v in row[es]]),
+                "color": [0, 0, 0, 80]  # semi-transparent black
+            })
 
-    # PolygonLayer
-    layer = pdk.Layer(
+    # DataFrames
+    poly_df = pd.DataFrame(poly_data)
+    radar_df = pd.DataFrame(radar_data)
+
+    # --- Pie layer ---
+    pie_layer = pdk.Layer(
         "PolygonLayer",
         data=poly_df,
         get_polygon="polygon",
@@ -65,17 +161,34 @@ def deck_plot(optimized_data, management_forms, management_colors, radius_km=5):
         auto_highlight=True
     )
 
-    # View centered over your data
+    radar_layer = pdk.Layer(
+        "PolygonLayer",
+        data=radar_df,
+        get_polygon="polygon",
+        filled=False,
+        stroked=True,
+        get_line_color=[0, 0, 0],
+        get_line_width=2,
+
+        line_width_units="pixels",   # <-- KEY FIX
+        line_width_min_pixels=1,     # ensures visibility
+
+        pickable=True
+    )
+
+    # --- View ---
     view_state = pdk.ViewState(
         latitude=optimized_data["lat"].mean(),
         longitude=optimized_data["lon"].mean(),
         zoom=8
     )
 
+    # --- Deck ---
     deck = pdk.Deck(
-        layers=[layer],
+        layers=[pie_layer, radar_layer],  # <-- add radar here
         initial_view_state=view_state,
-        tooltip={"text": "{name}\n{slice}: {value}"}
+        tooltip={"text": "{name}\n{slice}: {value}"},
+        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
     )
 
     return deck

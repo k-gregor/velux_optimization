@@ -131,20 +131,56 @@ if iland_button:
             )
         )
 
+        scores = iland_data_for_optimizer.set_index(['rid', 'Germany_id'])
+
+        cols = ['high-structure', 'low-structure', 'medium-structure', 'no-mgmt']
+
+        # --- Step 1: Merge datasets on rid + Germany_id ---
+        merged = scores.reset_index().merge(
+            optimized_data.reset_index(),
+            on=['rid', 'Germany_id'],
+            suffixes=('_score', '_weight')
+        )
+
+        # --- Step 2: Compute weighted score (fast vectorized dot product) ---
+        score_vals = merged[[f"{c}_score" for c in cols]].values
+        weight_vals = merged[[f"{c}_weight" for c in cols]].values
+
+        merged['weighted_score'] = np.einsum('ij,ij->i', score_vals, weight_vals)
+
+        # --- Step 3: Aggregate per ES and RCPScenario (optional but usually needed) ---
+        result = (
+            merged
+            .groupby(['rid', 'Germany_id', 'RCPScenario', 'ES'], as_index=False)
+            ['weighted_score']
+            .sum()
+        )
+
+
         mean_portfolios = optimized_data.groupby('Germany_id').apply(opt.compute_mean_portfolios)
 
-        results = mean_portfolios.reset_index().merge(
+        mean_weighted_scores = result.groupby(['Germany_id', 'RCPScenario', 'ES'], as_index=False).mean()
+        min_scores = mean_weighted_scores.groupby(['Germany_id', 'ES'], as_index=False).min()
+        scores_wide = min_scores.pivot(
+            index='Germany_id',
+            columns='ES',
+            values='weighted_score'
+        )
+        scores_wide.columns.name = None
+        result = mean_portfolios.join(scores_wide)
+
+        results = result.reset_index().merge(
             hexagons,
             on="Germany_id"
         )
-
         results["lon"] = results.geometry.apply(lambda x: x.representative_point().x)
         results["lat"] = results.geometry.apply(lambda x: x.representative_point().y)
 
         st.session_state.deck_iland = optimization_plots.deck_plot(
             results,
             management_forms=ILAND_MANAGEMENTS,
-            management_colors=ILAND_COLORS
+            management_colors=ILAND_COLORS,
+            es=ILAND_ES
         )
 
 # ---- LPJ optimization ----
@@ -176,12 +212,44 @@ if lpj_button:
             )
         )
 
-        results = optimized_data.reset_index().rename(columns={'Lon': 'lon', 'Lat': 'lat'})
+        scores = lpj_data_for_optimizer.set_index(['Lon', 'Lat'])
+
+        # --- Step 1: Merge datasets on rid + Germany_id ---
+        merged = scores.reset_index().merge(
+            optimized_data.reset_index(),
+            on=['Lon', 'Lat'],
+            suffixes=('_score', '_weight')
+        )
+
+        # --- Step 2: Compute weighted score (fast vectorized dot product) ---
+        score_vals = merged[[f"{c}_score" for c in LPJ_MANAGEMENT_OPTIONS]].values
+        weight_vals = merged[[f"{c}_weight" for c in LPJ_MANAGEMENT_OPTIONS]].values
+
+        merged['weighted_score'] = np.einsum('ij,ij->i', score_vals, weight_vals)
+
+        # --- Step 3: Aggregate per ES and RCPScenario (optional but usually needed) ---
+        result = (
+            merged
+            .groupby(['Lon', 'Lat', 'ssp', 'ES'], as_index=False)
+            ['weighted_score']
+            .sum()
+        )
+
+        mean_weighted_scores = result.groupby(['Lon', 'Lat', 'ssp', 'ES'], as_index=False).mean()
+        min_scores = mean_weighted_scores.groupby(['Lon', 'Lat', 'ES'], as_index=False).min()
+        scores_wide = min_scores.pivot(
+            index=['Lon', 'Lat'],
+            columns='ES',
+            values='weighted_score'
+        )
+        scores_wide.columns.name = None
+        result = optimized_data.join(scores_wide).reset_index().rename(columns={'Lon': 'lon', 'Lat': 'lat'})
 
         st.session_state.deck_lpj = optimization_plots.deck_plot(
-            results,
+            result,
             management_forms=LPJ_MANAGEMENT_OPTIONS,
             management_colors=LPJ_MANAGEMENT_COLORS,
+            es=LPJ_ES,
             radius_km=15
         )
 

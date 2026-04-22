@@ -33,6 +33,8 @@ def prepare_for_optimization(gc_data, location_names, scenario_name):
 
 
 def optimize_gridcell(gc_data_for_optimizer, location, location_names, management_options, climate_scenarios, es, scenario_columnname, es_columnname, es_weights=None):
+    gc_data_for_optimizer = gc_data_for_optimizer[gc_data_for_optimizer[scenario_columnname].isin(climate_scenarios)]
+
     gc_data_for_optimizer[scenario_columnname] = pd.Categorical(
         gc_data_for_optimizer[scenario_columnname],
         categories=climate_scenarios,
