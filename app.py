@@ -80,21 +80,29 @@ if len(managements) < 2 or len({lon_col, lat_col, scen_col, es_col}) < 4:
 all_scenarios = sorted(df[scen_col].astype(str).unique())
 all_es = sorted(df[es_col].astype(str).unique())
 
-st.subheader("Climate scenarios")
-scenarios = st.multiselect("Scenarios to be robust against", all_scenarios, default=all_scenarios)
+# The form keeps widget changes local to the browser: nothing reruns until "Start optimization" is pressed.
+with st.form("optimization_settings", border=False):
+    st.subheader("Climate scenarios")
+    scenarios = st.multiselect("Scenarios to be robust against", all_scenarios, default=all_scenarios)
 
-st.subheader("Ecosystem service weights")
-weight_cols = st.columns(min(len(all_es), 5))
-weights, lower_better = {}, []
-for i, e in enumerate(all_es):
-    with weight_cols[i % len(weight_cols)]:
-        weights[e] = st.slider(e, 0, 5, 3, key=f"w_{e}")
-        if st.checkbox("lower is better", key=f"lb_{e}"):
-            lower_better.append(e)
+    st.subheader("Ecosystem service weights")
+    weight_cols = st.columns(min(len(all_es), 5))
+    weights, lower_better = {}, []
+    for i, e in enumerate(all_es):
+        with weight_cols[i % len(weight_cols)]:
+            weights[e] = st.slider(e, 0, 5, 3, key=f"w_{e}")
+            if st.checkbox("lower is better", key=f"lb_{e}"):
+                lower_better.append(e)
+
+    start = st.form_submit_button("Start optimization")
 
 radar = st.checkbox("Overlay ecosystem service scores (radar outline)", value=True)
 
-if st.button("Start optimization"):
+# everything that influences the result; used to tell whether the displayed result is still up to date
+settings = dict(file=uploaded.name, size=uploaded.size, cols=(lon_col, lat_col, scen_col, es_col),
+                managements=managements, scenarios=scenarios, weights=weights, lower_better=lower_better)
+
+if start:
     es_used = [e for e in all_es if weights[e] > 0]
     if not scenarios or not es_used:
         st.error("Select at least one scenario and give at least one ecosystem service a weight > 0.")
@@ -113,11 +121,15 @@ if st.button("Start optimization"):
     bar.empty()
     with st.spinner("Assigning regions..."):
         cells = go.assign_regions(cells)
-    st.session_state.upload_result = dict(cells=cells, managements=managements, es=es_used, radar=radar)
+    st.session_state.upload_result = dict(cells=cells, managements=managements, es=es_used, settings=settings)
 
 res = st.session_state.get("upload_result")
 if res is None:
     st.stop()
+
+if res["settings"] != settings:
+    st.warning("The settings or the data have changed since this result was computed. "
+               "Click \"Start optimization\" to update it.")
 
 cells, managements, es_used = res["cells"], res["managements"], res["es"]
 cells = cells.assign(name=cells["lon"].round(2).astype(str) + ", " + cells["lat"].round(2).astype(str))
@@ -133,7 +145,7 @@ radius_km = 0.4 * float(np.median(nn)) * 111
 st.subheader("Result")
 st.caption("Zoom out to aggregate: grid cells → states/provinces → countries (mean portfolio of the cells in each region).")
 html = mp.multilevel_html(cells, states, countries, managements, mp.default_colors(managements), es_used,
-                          cell_radius_km=radius_km, show_radar=res["radar"])
+                          cell_radius_km=radius_km, show_radar=radar)
 components.html(html, height=700)
 
 legend = " &nbsp; ".join(
