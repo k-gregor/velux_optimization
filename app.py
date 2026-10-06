@@ -1,269 +1,145 @@
 import streamlit as st
-import pydeck as pdk
-import pandas as pd
+import streamlit.components.v1 as components
 import numpy as np
-import optimization as opt
-import geopandas as gpd
-import optimization_plots
+import pandas as pd
+from scipy.spatial import cKDTree
+
+import generic_optimization as go
+import multilevel_plot as mp
 
 # Start with:
 # conda activate velux_opt && streamlit run app.py
 
-
-
-ILAND_CLIMATE_MODELS = ['ICHEC-EC-EARTH', 'MPI-M-MPI-ESM-LR', 'NCC-NorESM1-M']
-ILAND_CLIMATE_SCENARIOS = ['rcp26', 'rcp45', 'rcp85']
-ILAND_MANAGEMENTS = ["high-structure", "low-structure", "medium-structure", "no-mgmt"]
-ILAND_ES = ['abovegroundCarbon', 'shannonIndex', 'evapotranspiration_mm', 'mean_soilwatercontent_mm', 'volumeHarvested']
-ILAND_COLORS = [
-    [255, 165, 0, 160],
-    [50, 205, 50, 160],
-    [0, 100, 0, 160],
-    [128, 0, 128, 160]
-]
-
-LPJ_ES = ['cpool', 'shannon', 'harvest', 'litter']
-LPJ_CLIMATE_SCENARIOS = ['ssp126', 'ssp585']
-LPJ_MANAGEMENT_OPTIONS = [
-    'spbau_manbau', 'spbau_shortrot', 'spbau_longrot', 'spbau_stop',
-    'tobd_manbau', 'tobd_shortrot', 'tobd_longrot',
-    'tone_manbau', 'tone_shortrot', 'tone_longrot'
-]
-LPJ_MANAGEMENT_COLORS = [optimization_plots.get_color(m) for m in LPJ_MANAGEMENT_OPTIONS]
-
-
-
 st.set_page_config(layout="wide")
-
 st.title("Robust forest optimization")
 
+st.markdown(
+    "Upload a CSV in long format: one row per **grid cell × climate scenario × ecosystem service**, "
+    "with the coordinates, a scenario column, an ecosystem-service column and one column per management option."
+)
+
+st.markdown("Example (column names are arbitrary, you map them below; lower values are not better, higher is always better):")
+st.code(
+    "Lon;Lat;ssp;variable;spbau_manbau;spbau_shortrot;tobd_manbau\n"
+    "-8.75;42.75;ssp126;cpool;9.24;9.24;9.24\n"
+    "-8.75;42.75;ssp126;shannon;1.10;0.95;1.32\n"
+    "-8.75;42.75;ssp585;cpool;8.90;8.71;9.01\n"
+    "-8.75;42.75;ssp585;shannon;1.05;0.90;1.28\n"
+    "-8.25;42.25;ssp126;cpool;16.93;16.64;17.31\n"
+    "...",
+    language="text",
+)
+st.caption("Every grid cell needs one row for each combination of climate scenario and ecosystem service. "
+           "Your data does **not** need to be normalized: for each cell, scenario and service the values are "
+           "automatically rescaled across the management columns to 0 (worst) – 1 (best). "
+           "Already normalized data works too.")
+
+uploaded = st.file_uploader("Data file (csv, ';' / ',' / tab separated)", type=["csv", "txt", "gz"])
+if uploaded is None:
+    st.stop()
 
 
-# =========================
-# CACHED DATA LOADING
-# =========================
 @st.cache_data
-def load_iland_data():
-    return pd.read_csv('brandenburg_optimizer_data_normalized.csv')
-
-@st.cache_data
-def load_lpj_data():
-    return pd.read_csv('lpjguess_optimizer_data_normalized.csv', sep=';')
-
-@st.cache_data
-def load_hexagons():
-    return gpd.read_file('hexagon_grid.shp').to_crs(epsg=4326)
-
-iland_data_for_optimizer = load_iland_data()
-lpj_data_for_optimizer = load_lpj_data()
-hexagons = load_hexagons()
+def load(file):
+    return go.read_table(file)
 
 
+df = load(uploaded)
+st.caption(f"{len(df):,} rows, {len(df.columns)} columns")
+with st.expander("Preview"):
+    st.dataframe(df.head(20))
+
+# ---- column mapping ----
+cols = list(df.columns)
 
 
-col_iland, col_lpj = st.columns(2)
-
-with col_iland:
-    st.subheader("iLand weights")
-    param_c = st.slider("C sequestration", 0, 5, 3, key="iland_c")
-    param_bio = st.slider("Species diversity", 0, 5, 3, key="iland_bio")
-    param_et = st.slider("Evapotranspiration", 0, 5, 3, key="iland_et")
-    param_water = st.slider("Soil water", 0, 5, 3, key="iland_water")
-    param_harv = st.slider("Harvests", 0, 5, 3, key="iland_harv")
-
-    st.subheader("iLand climate scenarios")
-    iland_selected_scenarios = st.multiselect(
-        "Select climate scenarios:",
-        ILAND_CLIMATE_SCENARIOS,
-        default=ILAND_CLIMATE_SCENARIOS  # optional default
-    )
-
-    iland_button = st.button("Start iLand optimization (~30s)")
-
-with col_lpj:
-    st.subheader("LPJ-GUESS weights")
-    lpj_param_c = st.slider("C sequestration", 0, 5, 3, key="lpj_c")
-    lpj_param_litter = st.slider("Litter", 0, 5, 3, key="lpj_litter")
-    lpj_param_shannon = st.slider("Shannon", 0, 5, 3, key="lpj_shannon")
-    lpj_param_harv = st.slider("Harvest", 0, 5, 3, key="lpj_harv")
-
-    st.subheader("iLand climate scenarios")
-    lpj_selected_scenarios = st.multiselect(
-        "Select climate scenarios:",
-        LPJ_CLIMATE_SCENARIOS,
-        default=LPJ_CLIMATE_SCENARIOS  # optional default
-    )
-
-    lpj_button = st.button("Start LPJ optimization (~5s)")
+def pick(label, candidates):
+    guess = go.guess_column(cols, candidates)
+    return st.selectbox(label, cols, index=cols.index(guess) if guess is not None else 0)
 
 
-st.divider()
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    lon_col = pick("Longitude column", ["lon", "longitude", "x"])
+with c2:
+    lat_col = pick("Latitude column", ["lat", "latitude", "y"])
+with c3:
+    scen_col = pick("Climate scenario column", ["scenario", "ssp", "rcp", "climate"])
+with c4:
+    es_col = pick("Ecosystem service column", ["es", "ecoservice", "variable", "service"])
 
+used = {lon_col, lat_col, scen_col, es_col}
+remaining = [c for c in cols if c not in used]
+numeric_remaining = [c for c in remaining if pd.api.types.is_numeric_dtype(df[c])]
+managements = st.multiselect("Management columns", remaining, default=numeric_remaining)
+if len(managements) < 2 or len({lon_col, lat_col, scen_col, es_col}) < 4:
+    st.info("Select distinct columns for the four roles and at least two management columns.")
+    st.stop()
 
+# ---- selections ----
+all_scenarios = sorted(df[scen_col].astype(str).unique())
+all_es = sorted(df[es_col].astype(str).unique())
 
-if "deck_iland" not in st.session_state:
-    st.session_state.deck_iland = None
+st.subheader("Climate scenarios")
+scenarios = st.multiselect("Scenarios to be robust against", all_scenarios, default=all_scenarios)
 
-if "deck_lpj" not in st.session_state:
-    st.session_state.deck_lpj = None
+st.subheader("Ecosystem service weights")
+weight_cols = st.columns(min(len(all_es), 5))
+weights, lower_better = {}, []
+for i, e in enumerate(all_es):
+    with weight_cols[i % len(weight_cols)]:
+        weights[e] = st.slider(e, 0, 5, 3, key=f"w_{e}")
+        if st.checkbox("lower is better", key=f"lb_{e}"):
+            lower_better.append(e)
 
-# =========================
-# BUTTONS
-# =========================
+radar = st.checkbox("Overlay ecosystem service scores (radar outline)", value=True)
 
-# ---- iLand optimization ----
-if iland_button:
-    with st.spinner("Running iLand optimization..."):
-        weights = np.array([param_c, param_bio, param_et, param_water, param_harv], dtype=float)
-        if weights.sum() > 0:
-            weights /= weights.sum()
+if st.button("Start optimization"):
+    es_used = [e for e in all_es if weights[e] > 0]
+    if not scenarios or not es_used:
+        st.error("Select at least one scenario and give at least one ecosystem service a weight > 0.")
+        st.stop()
+    prepared = go.prepare_data(df, lon_col, lat_col, scen_col, es_col, managements, lower_is_better=lower_better)
+    prepared, n_dropped = go.drop_incomplete_cells(prepared, scenarios, es_used)
+    if n_dropped:
+        st.warning(f"{n_dropped} grid cells lack some selected scenario/service combination and were skipped.")
+    if prepared.empty:
+        st.error("No complete grid cells left.")
+        st.stop()
 
-        optimized_data = iland_data_for_optimizer.groupby(['rid', 'Germany_id'], group_keys=False).apply(
-            lambda gc: opt.optimize_gridcell(
-                gc, gc.name,
-                location_names=['rid', 'Germany_id'],
-                management_options=ILAND_MANAGEMENTS,
-                climate_scenarios=iland_selected_scenarios,
-                es=ILAND_ES,
-                scenario_columnname='RCPScenario',
-                es_columnname='ES',
-                es_weights=weights
-            )
-        )
+    bar = st.progress(0.0, text="Optimizing grid cells...")
+    cells = go.run_optimization(prepared, managements, scenarios, {e: weights[e] for e in es_used},
+                                progress=lambda f: bar.progress(f, text="Optimizing grid cells..."))
+    bar.empty()
+    with st.spinner("Assigning regions..."):
+        cells = go.assign_regions(cells)
+    st.session_state.upload_result = dict(cells=cells, managements=managements, es=es_used, radar=radar)
 
-        scores = iland_data_for_optimizer.set_index(['rid', 'Germany_id'])
+res = st.session_state.get("upload_result")
+if res is None:
+    st.stop()
 
-        cols = ['high-structure', 'low-structure', 'medium-structure', 'no-mgmt']
+cells, managements, es_used = res["cells"], res["managements"], res["es"]
+cells = cells.assign(name=cells["lon"].round(2).astype(str) + ", " + cells["lat"].round(2).astype(str))
+value_cols = managements + es_used
+states = go.aggregate(cells, value_cols, ["country", "state"])
+countries = go.aggregate(cells, value_cols, "country")
 
-        # --- Step 1: Merge datasets on rid + Germany_id ---
-        merged = scores.reset_index().merge(
-            optimized_data.reset_index(),
-            on=['rid', 'Germany_id'],
-            suffixes=('_score', '_weight')
-        )
+# pie radius ~ 40% of the median distance to the nearest neighbouring cell (capped for isolated cells)
+xy = cells[["lon", "lat"]].to_numpy() * [np.cos(np.deg2rad(cells["lat"].mean())), 1.0]
+nn = cKDTree(xy).query(xy, k=2)[0][:, 1] if len(xy) > 1 else np.array([0.5])
+radius_km = 0.4 * float(np.median(nn)) * 111
 
-        # --- Step 2: Compute weighted score (fast vectorized dot product) ---
-        score_vals = merged[[f"{c}_score" for c in cols]].values
-        weight_vals = merged[[f"{c}_weight" for c in cols]].values
+st.subheader("Result")
+st.caption("Zoom out to aggregate: grid cells → states/provinces → countries (mean portfolio of the cells in each region).")
+html = mp.multilevel_html(cells, states, countries, managements, mp.default_colors(managements), es_used,
+                          cell_radius_km=radius_km, show_radar=res["radar"])
+components.html(html, height=700)
 
-        merged['weighted_score'] = np.einsum('ij,ij->i', score_vals, weight_vals)
+legend = " &nbsp; ".join(
+    f"<span style='color:rgb({c[0]},{c[1]},{c[2]})'>&#9632;</span> {m}" for m, c in mp.default_colors(managements).items())
+st.markdown(legend, unsafe_allow_html=True)
 
-        # --- Step 3: Aggregate per ES and RCPScenario (optional but usually needed) ---
-        result = (
-            merged
-            .groupby(['rid', 'Germany_id', 'RCPScenario', 'ES'], as_index=False)
-            ['weighted_score']
-            .sum()
-        )
-
-
-        mean_portfolios = optimized_data.groupby('Germany_id').apply(opt.compute_mean_portfolios)
-
-        mean_weighted_scores = result.groupby(['Germany_id', 'RCPScenario', 'ES'], as_index=False).mean()
-        min_scores = mean_weighted_scores.groupby(['Germany_id', 'ES'], as_index=False).min()
-        scores_wide = min_scores.pivot(
-            index='Germany_id',
-            columns='ES',
-            values='weighted_score'
-        )
-        scores_wide.columns.name = None
-        result = mean_portfolios.join(scores_wide)
-
-        results = result.reset_index().merge(
-            hexagons,
-            on="Germany_id"
-        )
-        results["lon"] = results.geometry.apply(lambda x: x.representative_point().x)
-        results["lat"] = results.geometry.apply(lambda x: x.representative_point().y)
-
-        st.session_state.deck_iland = optimization_plots.deck_plot(
-            results,
-            management_forms=ILAND_MANAGEMENTS,
-            management_colors=ILAND_COLORS,
-            es=ILAND_ES
-        )
-
-# ---- LPJ optimization ----
-if lpj_button:
-    with st.spinner("Running LPJ optimization..."):
-
-        # TODO should be done with a dictionary to make sure it matches the right one.
-        lpj_weights = np.array([
-            lpj_param_c,
-            lpj_param_shannon,
-            lpj_param_harv,
-            lpj_param_litter
-        ], dtype=float)
-
-        if lpj_weights.sum() > 0:
-            lpj_weights /= lpj_weights.sum()
-
-        optimized_data = lpj_data_for_optimizer.groupby(['Lon', 'Lat'], group_keys=False).apply(
-            lambda gc: opt.optimize_gridcell(
-                gc.reset_index(),
-                location=gc.name,
-                management_options=LPJ_MANAGEMENT_OPTIONS,
-                climate_scenarios=lpj_selected_scenarios    ,
-                location_names=['Lon', 'Lat'],
-                scenario_columnname='ssp',
-                es_columnname='ES',
-                es=LPJ_ES,
-                es_weights=lpj_weights
-            )
-        )
-
-        scores = lpj_data_for_optimizer.set_index(['Lon', 'Lat'])
-
-        # --- Step 1: Merge datasets on rid + Germany_id ---
-        merged = scores.reset_index().merge(
-            optimized_data.reset_index(),
-            on=['Lon', 'Lat'],
-            suffixes=('_score', '_weight')
-        )
-
-        # --- Step 2: Compute weighted score (fast vectorized dot product) ---
-        score_vals = merged[[f"{c}_score" for c in LPJ_MANAGEMENT_OPTIONS]].values
-        weight_vals = merged[[f"{c}_weight" for c in LPJ_MANAGEMENT_OPTIONS]].values
-
-        merged['weighted_score'] = np.einsum('ij,ij->i', score_vals, weight_vals)
-
-        # --- Step 3: Aggregate per ES and RCPScenario (optional but usually needed) ---
-        result = (
-            merged
-            .groupby(['Lon', 'Lat', 'ssp', 'ES'], as_index=False)
-            ['weighted_score']
-            .sum()
-        )
-
-        mean_weighted_scores = result.groupby(['Lon', 'Lat', 'ssp', 'ES'], as_index=False).mean()
-        min_scores = mean_weighted_scores.groupby(['Lon', 'Lat', 'ES'], as_index=False).min()
-        scores_wide = min_scores.pivot(
-            index=['Lon', 'Lat'],
-            columns='ES',
-            values='weighted_score'
-        )
-        scores_wide.columns.name = None
-        result = optimized_data.join(scores_wide).reset_index().rename(columns={'Lon': 'lon', 'Lat': 'lat'})
-
-        st.session_state.deck_lpj = optimization_plots.deck_plot(
-            result,
-            management_forms=LPJ_MANAGEMENT_OPTIONS,
-            management_colors=LPJ_MANAGEMENT_COLORS,
-            es=LPJ_ES,
-            radius_km=15
-        )
-
-# =========================
-# DISPLAY
-# =========================
-col1, col2 = st.columns(2)
-
-with col1:
-    if st.session_state.deck_iland is not None:
-        st.subheader("iLand Optimization")
-        st.pydeck_chart(st.session_state.deck_iland)
-
-with col2:
-    if st.session_state.deck_lpj is not None:
-        st.subheader("LPJ-GUESS Optimization")
-        st.pydeck_chart(st.session_state.deck_lpj)
+with st.expander("Results table"):
+    st.dataframe(cells.drop(columns="name"))
+    st.download_button("Download cell results (csv)", cells.drop(columns="name").to_csv(index=False), "optimization_result.csv")
